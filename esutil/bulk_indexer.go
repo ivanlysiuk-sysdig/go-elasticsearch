@@ -95,6 +95,7 @@ type BulkIndexerItem struct {
 	DocumentType    string
 	Body            io.Reader
 	RetryOnConflict *int
+	Routing         string // Per item
 
 	OnSuccess func(context.Context, BulkIndexerItem, BulkIndexerResponseItem)        // Per item
 	OnFailure func(context.Context, BulkIndexerItem, BulkIndexerResponseItem, error) // Per item
@@ -409,6 +410,15 @@ func (w *worker) writeMeta(item BulkIndexerItem) error {
 		}
 		w.buf.WriteString(`"_index":`)
 		w.aux = strconv.AppendQuote(w.aux, item.Index)
+		w.buf.Write(w.aux)
+		w.aux = w.aux[:0]
+	}
+	if item.Routing != "" {
+		if item.DocumentID != "" || item.Index != "" {
+			w.buf.WriteRune(',')
+		}
+		w.buf.WriteString(`"routing":`)
+		w.aux = strconv.AppendQuote(w.aux, item.Routing)
 		w.buf.Write(w.aux)
 		w.aux = w.aux[:0]
 	}
