@@ -51,9 +51,10 @@ type BulkIndexerConfig struct {
 	Decoder     BulkResponseJSONDecoder // A custom JSON decoder.
 	DebugLogger BulkIndexerDebugLogger  // An optional logger for debugging.
 
-	OnError      func(context.Context, error)          // Called for indexer errors.
-	OnFlushStart func(context.Context) context.Context // Called when the flush starts.
-	OnFlushEnd   func(context.Context)                 // Called when the flush ends.
+	OnError      func(context.Context, error)                           // Called for indexer errors.
+	OnFlushStart func(context.Context) context.Context                  // Called when the flush starts.
+	OnFlushEnd   func(context.Context)                                  // Called when the flush ends.
+	OnPreFlush   func(cxt context.Context, numItems int, bufferLen int) // Called write before flush
 
 	// Parameters of the Bulk API.
 	Index               string
@@ -476,6 +477,9 @@ func (w *worker) flush(ctx context.Context) error {
 	}
 
 	atomic.AddUint64(&w.bi.stats.numRequests, 1)
+	if w.bi.config.OnPreFlush != nil {
+		w.bi.config.OnPreFlush(ctx, len(w.items), w.buf.Len())
+	}
 	req := esapi.BulkRequest{
 		Index:        w.bi.config.Index,
 		DocumentType: w.bi.config.DocumentType,
