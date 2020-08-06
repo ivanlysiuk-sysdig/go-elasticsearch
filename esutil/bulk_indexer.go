@@ -55,7 +55,7 @@ type BulkIndexerConfig struct {
 	OnFlushStart func(context.Context) context.Context                  // Called when the flush starts.
 	OnFlushEnd   func(context.Context)                                  // Called when the flush ends.
 	OnPreFlush   func(cxt context.Context, numItems int, bufferLen int) // Called write before flush
-	OnPostFlush  func(cxt context.Context, esTook int, realTook float64, success bool)
+	OnPostFlush  func(cxt context.Context, esTook int, realTook float64, status int)
 
 	// Parameters of the Bulk API.
 	Index               string
@@ -484,11 +484,11 @@ func (w *worker) flush(ctx context.Context) error {
 	}
 
 	esTook := 0 // we will report duration for the request execution in OnPostFlush
-	bulkSuccess := false
+	bulkStatus := 0
 	start := time.Now() // besides esTook, we will report realTook, just in case
 	defer func() {
 		if w.bi.config.OnPostFlush != nil {
-			w.bi.config.OnPostFlush(ctx, esTook, time.Since(start).Seconds(), bulkSuccess)
+			w.bi.config.OnPostFlush(ctx, esTook, time.Since(start).Seconds(), bulkStatus)
 		}
 	}()
 
@@ -523,6 +523,9 @@ func (w *worker) flush(ctx context.Context) error {
 	if res.Body != nil {
 		defer res.Body.Close()
 	}
+
+	bulkStatus = res.StatusCode // to report after defer
+
 	if res.IsError() {
 		atomic.AddUint64(&w.bi.stats.numFailed, uint64(len(w.items)))
 		// TODO(karmi): Wrap error (include response struct)
@@ -540,8 +543,7 @@ func (w *worker) flush(ctx context.Context) error {
 		return fmt.Errorf("flush: error parsing response body: %s", err)
 	}
 
-	esTook = blk.Took  // to report after defer
-	bulkSuccess = true // to report after defer
+	esTook = blk.Took // to report after defer
 
 	for i, blkItem := range blk.Items {
 		var (
