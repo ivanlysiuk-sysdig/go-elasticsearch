@@ -55,6 +55,7 @@ type BulkIndexerConfig struct {
 	OnFlushStart func(context.Context) context.Context                  // Called when the flush starts.
 	OnFlushEnd   func(context.Context)                                  // Called when the flush ends.
 	OnPreFlush   func(cxt context.Context, numItems int, bufferLen int) // Called write before flush
+	OnPostFlush  func(cxt context.Context, esTook int, realTook float64, success bool)
 
 	// Parameters of the Bulk API.
 	Index               string
@@ -477,9 +478,20 @@ func (w *worker) flush(ctx context.Context) error {
 	}
 
 	atomic.AddUint64(&w.bi.stats.numRequests, 1)
+
 	if w.bi.config.OnPreFlush != nil {
 		w.bi.config.OnPreFlush(ctx, len(w.items), w.buf.Len())
 	}
+
+	esTook := 0 // we will report duration for the request execution in OnPostFlush
+	bulkSuccess := false
+	start := time.Now() // besides esTook, we will report realTook, just in case
+	defer func() {
+		if w.bi.config.OnPostFlush != nil {
+			w.bi.config.OnPostFlush(ctx, esTook, time.Since(start).Seconds(), bulkSuccess)
+		}
+	}()
+
 	req := esapi.BulkRequest{
 		Index:        w.bi.config.Index,
 		DocumentType: w.bi.config.DocumentType,
@@ -527,6 +539,9 @@ func (w *worker) flush(ctx context.Context) error {
 		}
 		return fmt.Errorf("flush: error parsing response body: %s", err)
 	}
+
+	esTook = blk.Took  // to report after defer
+	bulkSuccess = true // to report after defer
 
 	for i, blkItem := range blk.Items {
 		var (
