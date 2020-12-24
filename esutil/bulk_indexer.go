@@ -51,9 +51,11 @@ type BulkIndexerConfig struct {
 	Decoder     BulkResponseJSONDecoder // A custom JSON decoder.
 	DebugLogger BulkIndexerDebugLogger  // An optional logger for debugging.
 
-	OnError      func(context.Context, error)          // Called for indexer errors.
-	OnFlushStart func(context.Context) context.Context // Called when the flush starts.
-	OnFlushEnd   func(context.Context)                 // Called when the flush ends.
+	OnError      func(context.Context, error)                           // Called for indexer errors.
+	OnFlushStart func(context.Context) context.Context                  // Called when the flush starts.
+	OnFlushEnd   func(context.Context)                                  // Called when the flush ends.
+	OnPreFlush   func(cxt context.Context, numItems int, bufferLen int) // Called write before flush
+	OnPostFlush  func(cxt context.Context, esTook int, realTook float64, status int)
 
 	// Parameters of the Bulk API.
 	Index               string
@@ -93,6 +95,7 @@ type BulkIndexerItem struct {
 	DocumentID      string
 	Body            io.Reader
 	RetryOnConflict *int
+	Routing         string // Per item
 
 	OnSuccess func(context.Context, BulkIndexerItem, BulkIndexerResponseItem)        // Per item
 	OnFailure func(context.Context, BulkIndexerItem, BulkIndexerResponseItem, error) // Per item
@@ -402,6 +405,17 @@ func (w *worker) writeMeta(item BulkIndexerItem) error {
 		w.buf.Write(w.aux)
 		w.aux = w.aux[:0]
 	}
+
+	if item.Routing != "" {
+		if item.DocumentID != "" || item.Index != "" {
+			w.buf.WriteRune(',')
+		}
+		w.buf.WriteString(`"routing":`)
+		w.aux = strconv.AppendQuote(w.aux, item.Routing)
+		w.buf.Write(w.aux)
+		w.aux = w.aux[:0]
+	}
+
 	w.buf.WriteRune('}')
 	w.buf.WriteRune('}')
 	w.buf.WriteRune('\n')
@@ -456,6 +470,20 @@ func (w *worker) flush(ctx context.Context) error {
 	}
 
 	atomic.AddUint64(&w.bi.stats.numRequests, 1)
+
+	if w.bi.config.OnPreFlush != nil {
+		w.bi.config.OnPreFlush(ctx, len(w.items), w.buf.Len())
+	}
+
+	esTook := 0 // we will report duration for the request execution in OnPostFlush
+	bulkStatus := 0
+	start := time.Now() // besides esTook, we will report realTook, just in case
+	defer func() {
+		if w.bi.config.OnPostFlush != nil {
+			w.bi.config.OnPostFlush(ctx, esTook, time.Since(start).Seconds(), bulkStatus)
+		}
+	}()
+
 	req := esapi.BulkRequest{
 		Index: w.bi.config.Index,
 		Body:  w.buf,
@@ -486,6 +514,9 @@ func (w *worker) flush(ctx context.Context) error {
 	if res.Body != nil {
 		defer res.Body.Close()
 	}
+
+	bulkStatus = res.StatusCode // to report after defer
+
 	if res.IsError() {
 		atomic.AddUint64(&w.bi.stats.numFailed, uint64(len(w.items)))
 		// TODO(karmi): Wrap error (include response struct)
@@ -502,6 +533,8 @@ func (w *worker) flush(ctx context.Context) error {
 		}
 		return fmt.Errorf("flush: error parsing response body: %s", err)
 	}
+
+	esTook = blk.Took // to report after defer
 
 	for i, blkItem := range blk.Items {
 		var (
